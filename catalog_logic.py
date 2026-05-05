@@ -26,7 +26,7 @@ SESSIONS = {}
 EMBEDDING_MATRIX = None   # np.ndarray shape (N, D)
 EMBEDDING_CACHE = {}      # query_text -> np.ndarray
 
-# TF-IDF fallback (lazy-loaded only if embedding API fails)
+# TF-IDF fallback (lazy-loaded only if embedding API fails at query time)
 _TFIDF_VECTORIZER = None
 _TFIDF_MATRIX = None
 
@@ -90,16 +90,12 @@ FOLLOWUP_PHRASES = [
 ]
 
 # ---------------------------------------------------------------------------
-# Text normalization helpers
+# Text normalization
 # ---------------------------------------------------------------------------
 
 def normalize_polish_text(text):
     text = str(text).lower().strip()
-    replacements = {
-        "ą": "a", "ć": "c", "ę": "e", "ł": "l", "ń": "n",
-        "ó": "o", "ś": "s", "ż": "z", "ź": "z"
-    }
-    for k, v in replacements.items():
+    for k, v in {"ą":"a","ć":"c","ę":"e","ł":"l","ń":"n","ó":"o","ś":"s","ż":"z","ź":"z"}.items():
         text = text.replace(k, v)
     return text
 
@@ -140,12 +136,9 @@ def infer_product_type(title):
 
 def infer_color(title):
     t = normalize_polish_text(title)
-    if "czarn" in t:
-        return "czarny"
-    if "bial" in t:
-        return "biały"
-    if "bezow" in t or "bezowa" in t:
-        return "beżowy"
+    if "czarn" in t: return "czarny"
+    if "bial" in t:  return "biały"
+    if "bezow" in t or "bezowa" in t: return "beżowy"
     return ""
 
 
@@ -154,7 +147,6 @@ def infer_color(title):
 # ---------------------------------------------------------------------------
 
 def build_embedding_text(p):
-    """Plain text used to generate the embedding vector for a product."""
     parts = [
         p.get("title", ""),
         p.get("brand", ""),
@@ -170,7 +162,6 @@ def build_embedding_text(p):
 
 
 def build_product_json(p):
-    """Structured dict passed as context to Gemini (serialized as JSON)."""
     return {
         "id": p.get("id"),
         "nazwa": p.get("title", ""),
@@ -200,9 +191,8 @@ def build_product_json(p):
 def load_products_from_xml(xml_path="products.xml"):
     tree = ET.parse(xml_path)
     root = tree.getroot()
-    products = []
     NS = "{http://base.google.com/ns/1.0}"
-
+    products = []
     for i, item in enumerate(root.findall(".//item"), start=1):
         title = item.findtext("title", default="").strip()
         p = {
@@ -215,17 +205,13 @@ def load_products_from_xml(xml_path="products.xml"):
             "price": item.findtext(f"{NS}price", default="").strip(),
             "category": item.findtext(f"{NS}google_product_category", default="").strip(),
             "color": infer_color(title),
-            "mount_type": "",
-            "material": "",
-            "finish": "",
-            "dimensions": "",
+            "mount_type": "", "material": "", "finish": "", "dimensions": "",
             "link": item.findtext("link", default="").strip(),
             "image": item.findtext(f"{NS}image_link", default="").strip(),
             "description": item.findtext("description", default="").strip(),
             "product_type": infer_product_type(title),
         }
         products.append(p)
-
     return products
 
 
@@ -238,34 +224,24 @@ def fetch_product_page_fields(url):
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         tree = html.fromstring(r.text)
-        text = " ".join(tree.xpath("//body//text()"))
-        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+", " ", " ".join(tree.xpath("//body//text()"))).strip()
         t = normalize_polish_text(text)
 
         material = []
-        if "stal nierdzewna" in t:
-            material.append("stal nierdzewna")
-        if "tworzywo sztuczne" in t:
-            material.append("tworzywo sztuczne")
+        if "stal nierdzewna" in t: material.append("stal nierdzewna")
+        if "tworzywo sztuczne" in t: material.append("tworzywo sztuczne")
 
-        has_wall = any(x in t for x in ["wiszace", "wiszacy", "wiszaca"])
+        has_wall  = any(x in t for x in ["wiszace", "wiszacy", "wiszaca"])
         has_floor = any(x in t for x in ["wolnostojace", "wolnostojacy", "wolnostojaca"])
-        if has_wall and has_floor:
-            mount_type = "wiszący / wolnostojący"
-        elif has_wall:
-            mount_type = "wiszący"
-        elif has_floor:
-            mount_type = "wolnostojący"
-        else:
-            mount_type = ""
+        if has_wall and has_floor: mount_type = "wiszący / wolnostojący"
+        elif has_wall:             mount_type = "wiszący"
+        elif has_floor:            mount_type = "wolnostojący"
+        else:                      mount_type = ""
 
         finish = []
-        if "malowana proszkowo" in t:
-            finish.append("powłoka malowana proszkowo")
-        if "polmat" in t:
-            finish.append("półmat")
-        elif any(x in t for x in ["matowa", "matowe", "matowy"]):
-            finish.append("mat")
+        if "malowana proszkowo" in t: finish.append("powłoka malowana proszkowo")
+        if "polmat" in t:             finish.append("półmat")
+        elif any(x in t for x in ["matowa", "matowe", "matowy"]): finish.append("mat")
 
         return {
             "material": ", ".join(dict.fromkeys(material)),
@@ -281,12 +257,11 @@ def enrich_all_products(products):
     for idx, p in enumerate(products, start=1):
         if not p.get("link"):
             continue
-        needs_more = not p.get("material") or not p.get("mount_type") or not p.get("finish")
-        if needs_more:
+        if not p.get("material") or not p.get("mount_type") or not p.get("finish"):
             extra = fetch_product_page_fields(p["link"])
-            p["material"] = p["material"] or extra["material"]
+            p["material"]   = p["material"]   or extra["material"]
             p["mount_type"] = p["mount_type"] or extra["mount_type"]
-            p["finish"] = p["finish"] or extra["finish"]
+            p["finish"]     = p["finish"]     or extra["finish"]
         if idx % 10 == 0:
             print(f"[catalog] Enriched {idx}/{len(products)}")
         time.sleep(0.15)
@@ -295,29 +270,46 @@ def enrich_all_products(products):
 
 
 # ---------------------------------------------------------------------------
-# Embedding index
+# Embedding index — with 429 retry + exponential backoff
 # ---------------------------------------------------------------------------
 
-def _embed_texts(texts):
-    """Call Gemini embeddings API, return numpy matrix (N, D)."""
-    result = client.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=texts,
-    )
-    vectors = [e.values for e in result.embeddings]
-    return np.array(vectors, dtype=np.float32)
+def _embed_batch_with_retry(texts, max_retries=6):
+    """Embed a single batch, retrying on 429 with exponential backoff."""
+    delay = 15  # seconds — free tier window is 60s/100req
+    for attempt in range(max_retries):
+        try:
+            result = client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=texts,
+            )
+            return np.array([e.values for e in result.embeddings], dtype=np.float32)
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                wait = delay * (2 ** attempt)  # 15, 30, 60, 120 ...
+                print(f"[catalog] 429 rate limit, waiting {wait}s (attempt {attempt+1}/{max_retries})...")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"Embedding failed after {max_retries} retries (persistent 429).")
 
 
 def build_embedding_index(products):
     global EMBEDDING_MATRIX
     print(f"[catalog] Building embedding index for {len(products)} products...")
     texts = [build_embedding_text(p) for p in products]
-    batch_size = 100
+
+    # Batch size 50 — well under the 100 req/min free tier limit
+    # Sleep 65s between batches to reset the per-minute quota window
+    batch_size = 50
     batches = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        batches.append(_embed_texts(batch))
-        time.sleep(0.3)
+        print(f"[catalog] Embedding batch {i//batch_size + 1}/{-(-len(texts)//batch_size)} ({len(batch)} items)...")
+        batches.append(_embed_batch_with_retry(batch))
+        if i + batch_size < len(texts):  # no sleep after last batch
+            time.sleep(65)  # wait out the 1-minute quota window
+
     EMBEDDING_MATRIX = np.vstack(batches)
     norms = np.linalg.norm(EMBEDDING_MATRIX, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1, norms)
@@ -341,7 +333,7 @@ def search_products(query, top_k=8):
         try:
             query_vec = EMBEDDING_CACHE.get(query)
             if query_vec is None:
-                query_vec = _embed_texts([query])[0]
+                query_vec = _embed_batch_with_retry([query])[0]
                 norm = np.linalg.norm(query_vec)
                 if norm > 0:
                     query_vec = query_vec / norm
@@ -396,8 +388,7 @@ def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
             retrieval_query = f"{last_user_questions[-1]} {question}"
 
     matches = search_products(retrieval_query, top_k=top_k)
-    context_list = [build_product_json(p) for p in matches]
-    context_json = json.dumps(context_list, ensure_ascii=False, indent=2)
+    context_json = json.dumps([build_product_json(p) for p in matches], ensure_ascii=False, indent=2)
 
     user_message = f"""
 {history_text}
@@ -410,7 +401,6 @@ Dane katalogowe (JSON):
 """.strip()
 
     last_error = None
-
     for model_name in FALLBACK_MODELS:
         for attempt in range(retries):
             try:
