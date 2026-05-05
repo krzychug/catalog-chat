@@ -1,6 +1,5 @@
 import os
-import asyncio
-from contextlib import asynccontextmanager
+import threading
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -8,28 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from catalog_logic import init_catalog, chat_with_session, reset_session
 
-CATALOG_READY = False
-
-
-async def _background_init():
-    global CATALOG_READY
-    try:
-        print("[startup] Initializing catalog in background...")
-        await asyncio.get_event_loop().run_in_executor(None, init_catalog)
-        CATALOG_READY = True
-        print("[startup] Catalog ready.")
-    except Exception as e:
-        print(f"[startup] ERROR during catalog init: {e}")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Fire-and-forget: port binds immediately, catalog loads in background
-    asyncio.create_task(_background_init())
-    yield
-
-
-app = FastAPI(title="DABSTORY Catalog Chat", lifespan=lifespan)
+app = FastAPI(title="DABSTORY Catalog Chat")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,6 +19,25 @@ app.add_middleware(
 
 if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
+
+CATALOG_READY = False
+
+
+def _init_in_thread():
+    global CATALOG_READY
+    try:
+        print("[startup] Initializing catalog in background thread...")
+        init_catalog()
+        CATALOG_READY = True
+        print("[startup] Catalog ready.")
+    except Exception as e:
+        print(f"[startup] ERROR during catalog init: {e}")
+
+
+@app.on_event("startup")
+def startup_event():
+    t = threading.Thread(target=_init_in_thread, daemon=True)
+    t.start()
 
 
 class ChatRequest(BaseModel):
