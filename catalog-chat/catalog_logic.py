@@ -19,33 +19,14 @@ VECTORIZER = None
 DOC_MATRIX = None
 
 SYSTEM_INSTRUCTION = """
-Jesteś doradcą produktowym sklepu DABSTORY. Rozmawiasz z klientem naturalnie i konkretnie.
-
-Zasady ogólne:
-- Odpowiadasz wyłącznie po polsku.
-- Używasz tylko danych z sekcji "Dane katalogowe". Nie dopowiadasz niczego spoza danych.
-- Jeśli jakiegoś parametru brakuje w danych, po prostu go pomiń — nie pisz "Brak potwierdzenia".
-- Nie piszesz marketingowo. Nie używasz zwrotów: "z przyjemnością", "mam nadzieję", "chętnie pomogę", "świetny wybór".
-- Odróżniasz klasyczną szczotkę WC od zestawu 2w1 ze stojakiem lub uchwytem na papier.
-- Nie traktujesz części zamiennej jako pełnego produktu.
-- "in stock" = dostępny od ręki. "on demand" = dostępny na zamówienie.
-- Jeśli pytanie jest kontynuacją wcześniejszego wątku, uwzględniasz kontekst.
-
-Format odpowiedzi:
-- Piszesz naturalnie, jak doradca — nie jak eksport z bazy danych.
-- Przy liście produktów używasz zwięzłych punktorów. Każdy punkt zawiera: nazwę (jako link jeśli jest URL), cenę, dostępność i 1-2 najważniejsze cechy. Pomijasz pola których nie ma w danych.
-- Nie wypisujesz osobno etykiet "Kolor:", "Materiał:", "Typ montażu:" — wplatasz te informacje naturalnie w zdanie lub w skróconą linię punktu.
-- Link do produktu umieszczasz przy nazwie (jako markdown [Nazwa](URL)) lub na końcu linii — nigdy jako osobny punkt "URL:".
-- Nie powtarzasz informacji, które klient już zna z poprzednich wiadomości.
-- Jeśli wyniki zawierają zarówno klasyczne szczotki jak i zestawy 2w1, zaznaczasz tę różnicę krótko przy każdym produkcie.
-- Jeśli klient pyta o porównanie, porównujesz w zwięzłych punktach.
-- Odpowiedź powinna być krótka — nie dłuższa niż potrzeba.
+Jesteś doradcą produktowym sklepu DABSTORY. Odpowiadasz wyłącznie po polsku, krótko i konkretnie.
+Używasz tylko danych z sekcji "Dane katalogowe". Nie dopowiadasz niczego spoza danych.
+Jeśli parametru brakuje w danych, pomijasz go — nie piszesz "Brak".
+Nie używasz zwrotów marketingowych.
+Odróżniasz klasyczną szczotkę WC od zestawu 2w1 ze stojakiem.
+"in stock" = dostępny od ręki. "on demand" = na zamówienie.
+Przy liście produktów: nazwa (link jeśli jest URL), cena, dostępność, 1-2 cechy. Bez etykiet "Kolor:", "Materiał:" — wplatasz naturalnie.
 """.strip()
-
-FALLBACK_MODELS = [
-    MODEL_NAME,
-    "llama-3.3-70b-versatile",
-]
 
 FOLLOWUP_PHRASES = [
     "a które", "a ktore", "które z nich", "ktore z nich", "z nich",
@@ -82,7 +63,7 @@ def product_variant_label(p):
     return ""
 
 def build_product_text(p):
-    """Pełny tekst używany do indeksu TF-IDF (z opisem, MPN, GTIN)."""
+    """Pełny tekst używany do indeksu TF-IDF."""
     return f"""
 ID: {p.get('id','')}
 Nazwa: {p.get('title','')}
@@ -104,7 +85,7 @@ Opis: {p.get('description','')}
 """.strip()
 
 def build_product_context(p):
-    """Slim tekst wysłany do LLM — bez opisu, GTIN, MPN, zdjęcia."""
+    """Slim tekst wysłany do LLM — minimalna liczba tokenów."""
     parts = []
     if p.get('title'):         parts.append(f"Nazwa: {p['title']}")
     if p.get('availability'):  parts.append(f"Dostępność: {p['availability']}")
@@ -114,8 +95,6 @@ def build_product_context(p):
     if p.get('color'):         parts.append(f"Kolor: {p['color']}")
     if p.get('mount_type'):    parts.append(f"Montaż: {p['mount_type']}")
     if p.get('material'):      parts.append(f"Materiał: {p['material']}")
-    if p.get('finish'):        parts.append(f"Wykończenie: {p['finish']}")
-    if p.get('dimensions'):    parts.append(f"Wymiary: {p['dimensions']}")
     if p.get('link'):          parts.append(f"URL: {p['link']}")
     return "\n".join(parts)
 
@@ -205,7 +184,7 @@ def build_search_index():
     VECTORIZER = TfidfVectorizer()
     DOC_MATRIX = VECTORIZER.fit_transform(corpus)
 
-def search_products(query, top_k=5):
+def search_products(query, top_k=3):
     query_vec = VECTORIZER.transform([query])
     sims = cosine_similarity(query_vec, DOC_MATRIX).flatten()
     ranked_idx = sims.argsort()[::-1][:top_k]
@@ -284,13 +263,13 @@ def get_session(session_id):
         SESSIONS[session_id] = {"chat_memory": []}
     return SESSIONS[session_id]
 
-def chat_with_session(session_id, question, top_k=5, retries=3, memory_turns=6):
+def chat_with_session(session_id, question, top_k=3, retries=2, memory_turns=2):
     session = get_session(session_id)
     chat_memory = session["chat_memory"]
 
     history_text = ""
     if chat_memory:
-        recent = chat_memory[-memory_turns:]
+        recent = chat_memory[-(memory_turns * 2):]
         history_text = "\n\nHistoria rozmowy:\n" + "\n".join(
             [f"{m['role'].upper()}: {m['text']}" for m in recent]
         )
@@ -303,14 +282,12 @@ def chat_with_session(session_id, question, top_k=5, retries=3, memory_turns=6):
 
     matches = search_products(retrieval_query, top_k=top_k)
     matches = enrich_search_results(matches)
-    # Używamy slim kontekstu do LLM (bez opisu i GTIN)
     context = "\n\n".join([build_product_context(p) for p in matches]) if matches else "Brak pasujących produktów."
 
     user_message = f"""
 {history_text}
 
-Aktualne pytanie użytkownika:
-{question}
+Pytanie: {question}
 
 Dane katalogowe:
 {context}
@@ -318,29 +295,29 @@ Dane katalogowe:
 
     last_error = None
 
-    for model_name in FALLBACK_MODELS:
-        for attempt in range(retries):
-            try:
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
-                        {"role": "user",   "content": user_message}
-                    ],
-                    temperature=0.2,
-                )
-                answer = response.choices[0].message.content
-                chat_memory.append({"role": "user",      "text": question})
-                chat_memory.append({"role": "assistant", "text": answer})
-                session["chat_memory"] = chat_memory[-(memory_turns * 2):]
-                return answer
-            except Exception as e:
-                last_error = e
-                msg = str(e)
-                if "503" in msg or "rate_limit" in msg.lower() or "429" in msg or "413" in msg:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                break
+    for attempt in range(retries):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_INSTRUCTION},
+                    {"role": "user",   "content": user_message}
+                ],
+                temperature=0.2,
+                max_tokens=512,
+            )
+            answer = response.choices[0].message.content
+            chat_memory.append({"role": "user",      "text": question})
+            chat_memory.append({"role": "assistant", "text": answer})
+            session["chat_memory"] = chat_memory[-(memory_turns * 2):]
+            return answer
+        except Exception as e:
+            last_error = e
+            msg = str(e)
+            if "503" in msg or "rate_limit" in msg.lower() or "429" in msg or "413" in msg:
+                time.sleep(3 * (attempt + 1))
+                continue
+            break
 
     return f"Wystąpił błąd po stronie modelu: {last_error}"
 
