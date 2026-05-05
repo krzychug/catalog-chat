@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+requests
+lxml
+google-genai
+scikit-learn
+numpy
