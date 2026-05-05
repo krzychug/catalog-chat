@@ -14,13 +14,12 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001").strip()
 
 EMBEDDINGS_CACHE_FILE = "embeddings.npy"
 PRODUCTS_CACHE_FILE = "products_cache.json"
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 PRODUCTS = []
 SESSIONS = {}
@@ -321,18 +320,16 @@ def enrich_all_products(products):
 # ---------------------------------------------------------------------------
 
 def _save_cache(products, matrix):
-    """Persist enriched products + embedding matrix to disk."""
     try:
         with open(PRODUCTS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(products, f, ensure_ascii=False)
         np.save(EMBEDDINGS_CACHE_FILE, matrix)
-        print(f"[catalog] Cache saved: {PRODUCTS_CACHE_FILE}, {EMBEDDINGS_CACHE_FILE}")
+        print(f"[catalog] Cache saved.")
     except Exception as e:
         print(f"[catalog] Warning: could not save cache: {e}")
 
 
 def _load_cache():
-    """Load cached products + embedding matrix if both files exist and products.xml hasn't changed."""
     if not os.path.isfile(PRODUCTS_CACHE_FILE) or not os.path.isfile(EMBEDDINGS_CACHE_FILE):
         return None, None
     try:
@@ -372,25 +369,25 @@ def _embed_batch_with_retry(texts, max_retries=8):
                 time.sleep(wait)
             else:
                 raise
-    raise RuntimeError(f"Embedding failed after {max_retries} retries (persistent 429).")
+    raise RuntimeError(f"Embedding failed after {max_retries} retries.")
 
 
 def build_embedding_index(products):
     global EMBEDDING_MATRIX
+    if not EMBEDDING_MODEL:
+        print("[catalog] EMBEDDING_MODEL not set — skipping embedding index (TF-IDF will be used).")
+        return
     print(f"[catalog] Building embedding index for {len(products)} products...")
     texts = [build_embedding_text(p) for p in products]
-
-    batch_size = 20  # smaller batches = less chance of hitting rate limit burst
+    batch_size = 20
     batches = []
     total_batches = -(-len(texts) // batch_size)
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        batch_num = i // batch_size + 1
-        print(f"[catalog] Embedding batch {batch_num}/{total_batches} ({len(batch)} items)...")
+        print(f"[catalog] Embedding batch {i//batch_size+1}/{total_batches} ({len(batch)} items)...")
         batches.append(_embed_batch_with_retry(batch))
         if i + batch_size < len(texts):
-            time.sleep(5)  # small pause; 429 retry handles real backoff
-
+            time.sleep(5)
     EMBEDDING_MATRIX = np.vstack(batches)
     norms = np.linalg.norm(EMBEDDING_MATRIX, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1, norms)
@@ -403,10 +400,11 @@ def _build_tfidf_fallback():
     if _TFIDF_VECTORIZER is not None:
         return
     from sklearn.feature_extraction.text import TfidfVectorizer
-    print("[catalog] Building TF-IDF fallback index...")
+    print("[catalog] Building TF-IDF index...")
     corpus = [build_embedding_text(p) for p in PRODUCTS]
     _TFIDF_VECTORIZER = TfidfVectorizer()
     _TFIDF_MATRIX = _TFIDF_VECTORIZER.fit_transform(corpus)
+    print("[catalog] TF-IDF index ready.")
 
 
 def search_products(query, top_k=8, filters=None):
@@ -540,14 +538,22 @@ Dane katalogowe (JSON):
 def init_catalog():
     global PRODUCTS, EMBEDDING_MATRIX
 
-    cached_products, cached_matrix = _load_cache()
-    if cached_products is not None and cached_matrix is not None:
-        PRODUCTS = cached_products
-        EMBEDDING_MATRIX = cached_matrix
-        return
+    # Try loading from cache only if embeddings are enabled
+    if EMBEDDING_MODEL:
+        cached_products, cached_matrix = _load_cache()
+        if cached_products is not None and cached_matrix is not None:
+            PRODUCTS = cached_products
+            EMBEDDING_MATRIX = cached_matrix
+            return
 
     # Full rebuild
     PRODUCTS = load_products_from_xml("products.xml")
     PRODUCTS = enrich_all_products(PRODUCTS)
-    build_embedding_index(PRODUCTS)
-    _save_cache(PRODUCTS, EMBEDDING_MATRIX)
+
+    if EMBEDDING_MODEL:
+        build_embedding_index(PRODUCTS)
+        if EMBEDDING_MATRIX is not None:
+            _save_cache(PRODUCTS, EMBEDDING_MATRIX)
+    else:
+        print("[catalog] Embeddings disabled — using TF-IDF search.")
+        _build_tfidf_fallback()
