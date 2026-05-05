@@ -150,18 +150,21 @@ def load_products_from_xml(xml_path="products.xml"):
     products = []
 
     for i, item in enumerate(root.iter("item"), start=1):
-        title = _lxml_text(item, "title")
-        link = _lxml_text(item, "link")
-        description = _lxml_text(item, "description")
-        brand = _lxml_text(item, "brand", G)
-        mpn = _lxml_text(item, "mpn", G)
-        gtin = _lxml_text(item, "gtin", G)
+        # Wszystkie pola są w namespace g: (http://base.google.com/ns/1.0)
+        title        = _lxml_text(item, "title", G)
+        link         = _lxml_text(item, "link", G)
+        description  = _lxml_text(item, "description", G)
+        brand        = _lxml_text(item, "brand", G)
+        mpn          = _lxml_text(item, "mpn", G)
+        gtin         = _lxml_text(item, "gtin", G)
         availability = _lxml_text(item, "availability", G)
-        price = _lxml_text(item, "price", G)
-        image = _lxml_text(item, "image_link", G)
-        category = _lxml_text(item, "google_product_category", G)
+        price        = _lxml_text(item, "price", G)
+        image        = _lxml_text(item, "image_link", G)
+        category     = _lxml_text(item, "google_product_category", G)
 
-        # fallback: jeśli link pusty, spróbuj atom:link href
+        # fallback: jeśli g:link pusty, spróbuj zwykły <link> lub atom:link
+        if not link:
+            link = _lxml_text(item, "link")
         if not link:
             atom_link = item.find("{http://www.w3.org/2005/Atom}link")
             if atom_link is not None:
@@ -198,7 +201,8 @@ def load_products_from_xml(xml_path="products.xml"):
         p["text"] = build_product_text(p)
         products.append(p)
 
-    print(f"[catalog] Załadowano {len(products)} produktów. Przykład: '{products[0]['title'] if products else 'brak'}'")
+    first_title = products[0]['title'] if products else 'brak'
+    print(f"[catalog] Załadowano {len(products)} produktów. Przykład: '{first_title}'")
     return products
 
 def build_search_index():
@@ -228,7 +232,7 @@ def fetch_product_page_fields(url):
         if "tworzywo sztuczne" in text_norm:
             material.append("tworzywo sztuczne")
 
-        has_wall = any(x in text_norm for x in ["wiszace", "wiszacy", "wiszaca"])
+        has_wall  = any(x in text_norm for x in ["wiszace", "wiszacy", "wiszaca"])
         has_floor = any(x in text_norm for x in ["wolnostojace", "wolnostojacy", "wolnostojaca"])
 
         mount_type = ""
@@ -248,9 +252,9 @@ def fetch_product_page_fields(url):
             finish.append("mat")
 
         return {
-            "material": ", ".join(dict.fromkeys(material)),
+            "material":   ", ".join(dict.fromkeys(material)),
             "mount_type": mount_type,
-            "finish": ", ".join(dict.fromkeys(finish)),
+            "finish":     ", ".join(dict.fromkeys(finish)),
             "dimensions": ""
         }
     except Exception:
@@ -264,12 +268,9 @@ def enrich_one_product_from_page(p):
     needs_more = not p.get("material") or not p.get("mount_type") or not p.get("finish")
     if needs_more:
         extra = fetch_product_page_fields(p["link"])
-        if extra.get("material") and not p.get("material"):
-            p["material"] = extra["material"]
-        if extra.get("mount_type") and not p.get("mount_type"):
-            p["mount_type"] = extra["mount_type"]
-        if extra.get("finish") and not p.get("finish"):
-            p["finish"] = extra["finish"]
+        if extra.get("material")   and not p.get("material"):   p["material"]   = extra["material"]
+        if extra.get("mount_type") and not p.get("mount_type"): p["mount_type"] = extra["mount_type"]
+        if extra.get("finish")     and not p.get("finish"):     p["finish"]     = extra["finish"]
 
     p["text"] = build_product_text(p)
     return p
@@ -329,12 +330,12 @@ Dane katalogowe:
                     model=model_name,
                     messages=[
                         {"role": "system", "content": SYSTEM_INSTRUCTION},
-                        {"role": "user", "content": user_message}
+                        {"role": "user",   "content": user_message}
                     ],
                     temperature=0.2,
                 )
                 answer = response.choices[0].message.content
-                chat_memory.append({"role": "user", "text": question})
+                chat_memory.append({"role": "user",      "text": question})
                 chat_memory.append({"role": "assistant", "text": answer})
                 session["chat_memory"] = chat_memory[-(memory_turns * 2):]
                 return answer
