@@ -14,7 +14,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001").strip()
+# Empty string = TF-IDF only (no API calls). Set to "models/gemini-embedding-001" to enable.
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "").strip()
 
 EMBEDDINGS_CACHE_FILE = "embeddings.npy"
 PRODUCTS_CACHE_FILE = "products_cache.json"
@@ -538,7 +539,6 @@ Dane katalogowe (JSON):
 def init_catalog():
     global PRODUCTS, EMBEDDING_MATRIX
 
-    # Try loading from cache only if embeddings are enabled
     if EMBEDDING_MODEL:
         cached_products, cached_matrix = _load_cache()
         if cached_products is not None and cached_matrix is not None:
@@ -546,7 +546,6 @@ def init_catalog():
             EMBEDDING_MATRIX = cached_matrix
             return
 
-    # Full rebuild
     PRODUCTS = load_products_from_xml("products.xml")
     PRODUCTS = enrich_all_products(PRODUCTS)
 
