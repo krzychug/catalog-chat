@@ -3,6 +3,6 @@ uvicorn
 pydantic
 requests
 lxml
-groq
+google-genai
 scikit-learn
 numpy
