@@ -14,7 +14,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -164,7 +164,7 @@ def build_embedding_text(p):
         p.get("mount_type", ""),
         p.get("material", ""),
         p.get("finish", ""),
-        p.get("description", "")[:300],  # truncate long descriptions
+        p.get("description", "")[:300],
     ]
     return " ".join(x for x in parts if x)
 
@@ -194,7 +194,7 @@ def build_product_json(p):
 
 
 # ---------------------------------------------------------------------------
-# XML loading (unchanged format — backward compatible)
+# XML loading
 # ---------------------------------------------------------------------------
 
 def load_products_from_xml(xml_path="products.xml"):
@@ -230,11 +230,10 @@ def load_products_from_xml(xml_path="products.xml"):
 
 
 # ---------------------------------------------------------------------------
-# Page scraping — runs ONCE at startup, results cached in product dicts
+# Page scraping — runs ONCE at startup
 # ---------------------------------------------------------------------------
 
 def fetch_product_page_fields(url):
-    """Scrape a product page and extract material, mount_type, finish."""
     try:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
@@ -278,10 +277,6 @@ def fetch_product_page_fields(url):
 
 
 def enrich_all_products(products):
-    """Scrape every product page at startup and cache results in-memory.
-
-    Runs once during init_catalog(). No live scraping during user requests.
-    """
     print(f"[catalog] Enriching {len(products)} products from product pages...")
     for idx, p in enumerate(products, start=1):
         if not p.get("link"):
@@ -294,7 +289,7 @@ def enrich_all_products(products):
             p["finish"] = p["finish"] or extra["finish"]
         if idx % 10 == 0:
             print(f"[catalog] Enriched {idx}/{len(products)}")
-        time.sleep(0.15)  # polite crawl delay
+        time.sleep(0.15)
     print("[catalog] Enrichment complete.")
     return products
 
@@ -304,7 +299,7 @@ def enrich_all_products(products):
 # ---------------------------------------------------------------------------
 
 def _embed_texts(texts):
-    """Call Gemini embeddings API and return numpy matrix (N, D)."""
+    """Call Gemini embeddings API, return numpy matrix (N, D)."""
     result = client.models.embed_content(
         model=EMBEDDING_MODEL,
         contents=texts,
@@ -314,19 +309,16 @@ def _embed_texts(texts):
 
 
 def build_embedding_index(products):
-    """Embed all products and store matrix globally."""
     global EMBEDDING_MATRIX
     print(f"[catalog] Building embedding index for {len(products)} products...")
     texts = [build_embedding_text(p) for p in products]
-    # Process in batches to stay within API limits
     batch_size = 100
     batches = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
         batches.append(_embed_texts(batch))
-        time.sleep(0.2)
+        time.sleep(0.3)
     EMBEDDING_MATRIX = np.vstack(batches)
-    # L2-normalize for cosine similarity via dot product
     norms = np.linalg.norm(EMBEDDING_MATRIX, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1, norms)
     EMBEDDING_MATRIX = EMBEDDING_MATRIX / norms
@@ -334,7 +326,6 @@ def build_embedding_index(products):
 
 
 def _build_tfidf_fallback():
-    """Lazy-load TF-IDF as fallback when embedding API is unavailable."""
     global _TFIDF_VECTORIZER, _TFIDF_MATRIX
     if _TFIDF_VECTORIZER is not None:
         return
@@ -346,11 +337,6 @@ def _build_tfidf_fallback():
 
 
 def search_products(query, top_k=8):
-    """Return top_k products most similar to query.
-
-    Uses embedding cosine similarity; falls back to TF-IDF on API error.
-    """
-    # Try embedding search
     if EMBEDDING_MATRIX is not None:
         try:
             query_vec = EMBEDDING_CACHE.get(query)
@@ -360,14 +346,12 @@ def search_products(query, top_k=8):
                 if norm > 0:
                     query_vec = query_vec / norm
                 EMBEDDING_CACHE[query] = query_vec
-
-            scores = EMBEDDING_MATRIX @ query_vec  # cosine similarity
+            scores = EMBEDDING_MATRIX @ query_vec
             ranked_idx = scores.argsort()[::-1][:top_k]
             return [PRODUCTS[i] for i in ranked_idx]
         except Exception as e:
             print(f"[catalog] Embedding search failed, falling back to TF-IDF: {e}")
 
-    # TF-IDF fallback
     from sklearn.metrics.pairwise import cosine_similarity as cos_sim
     _build_tfidf_fallback()
     qvec = _TFIDF_VECTORIZER.transform([query])
@@ -398,7 +382,6 @@ def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
     session = get_session(session_id)
     chat_memory = session["chat_memory"]
 
-    # Build conversation history string
     history_text = ""
     if chat_memory:
         recent = chat_memory[-memory_turns:]
@@ -406,14 +389,12 @@ def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
             [f"{m['role'].upper()}: {m['text']}" for m in recent]
         )
 
-    # Expand followup queries with last user question for better retrieval
     retrieval_query = question
     if chat_memory and is_followup_question(question):
         last_user_questions = [m["text"] for m in chat_memory if m["role"] == "user"]
         if last_user_questions:
             retrieval_query = f"{last_user_questions[-1]} {question}"
 
-    # Retrieve and format context as JSON
     matches = search_products(retrieval_query, top_k=top_k)
     context_list = [build_product_json(p) for p in matches]
     context_json = json.dumps(context_list, ensure_ascii=False, indent=2)
@@ -462,7 +443,6 @@ Dane katalogowe (JSON):
 # ---------------------------------------------------------------------------
 
 def init_catalog():
-    """Load XML, enrich via scraping (once), build embedding index."""
     global PRODUCTS
     PRODUCTS = load_products_from_xml("products.xml")
     PRODUCTS = enrich_all_products(PRODUCTS)

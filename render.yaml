@@ -12,4 +12,4 @@ services:
       - key: MODEL_NAME
         value: gemini-2.5-flash
       - key: EMBEDDING_MODEL
-        value: text-embedding-004
+        value: gemini-embedding-001
