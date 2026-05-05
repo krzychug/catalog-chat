@@ -45,7 +45,6 @@ Format odpowiedzi:
 FALLBACK_MODELS = [
     MODEL_NAME,
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
 ]
 
 FOLLOWUP_PHRASES = [
@@ -83,6 +82,7 @@ def product_variant_label(p):
     return ""
 
 def build_product_text(p):
+    """Pełny tekst używany do indeksu TF-IDF (z opisem, MPN, GTIN)."""
     return f"""
 ID: {p.get('id','')}
 Nazwa: {p.get('title','')}
@@ -100,9 +100,24 @@ Materiał: {p.get('material','')}
 Wykończenie: {p.get('finish','')}
 Wymiary: {p.get('dimensions','')}
 URL: {p.get('link','')}
-Zdjęcie: {p.get('image','')}
 Opis: {p.get('description','')}
 """.strip()
+
+def build_product_context(p):
+    """Slim tekst wysłany do LLM — bez opisu, GTIN, MPN, zdjęcia."""
+    parts = []
+    if p.get('title'):         parts.append(f"Nazwa: {p['title']}")
+    if p.get('availability'):  parts.append(f"Dostępność: {p['availability']}")
+    if p.get('price'):         parts.append(f"Cena: {p['price']}")
+    variant = product_variant_label(p)
+    if variant:                parts.append(f"Wariant: {variant}")
+    if p.get('color'):         parts.append(f"Kolor: {p['color']}")
+    if p.get('mount_type'):    parts.append(f"Montaż: {p['mount_type']}")
+    if p.get('material'):      parts.append(f"Materiał: {p['material']}")
+    if p.get('finish'):        parts.append(f"Wykończenie: {p['finish']}")
+    if p.get('dimensions'):    parts.append(f"Wymiary: {p['dimensions']}")
+    if p.get('link'):          parts.append(f"URL: {p['link']}")
+    return "\n".join(parts)
 
 def infer_product_type(title):
     t = normalize_polish_text(title)
@@ -190,7 +205,7 @@ def build_search_index():
     VECTORIZER = TfidfVectorizer()
     DOC_MATRIX = VECTORIZER.fit_transform(corpus)
 
-def search_products(query, top_k=8):
+def search_products(query, top_k=5):
     query_vec = VECTORIZER.transform([query])
     sims = cosine_similarity(query_vec, DOC_MATRIX).flatten()
     ranked_idx = sims.argsort()[::-1][:top_k]
@@ -269,7 +284,7 @@ def get_session(session_id):
         SESSIONS[session_id] = {"chat_memory": []}
     return SESSIONS[session_id]
 
-def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
+def chat_with_session(session_id, question, top_k=5, retries=3, memory_turns=6):
     session = get_session(session_id)
     chat_memory = session["chat_memory"]
 
@@ -288,7 +303,8 @@ def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
 
     matches = search_products(retrieval_query, top_k=top_k)
     matches = enrich_search_results(matches)
-    context = "\n\n".join([p["text"] for p in matches]) if matches else "Brak pasujących produktów."
+    # Używamy slim kontekstu do LLM (bez opisu i GTIN)
+    context = "\n\n".join([build_product_context(p) for p in matches]) if matches else "Brak pasujących produktów."
 
     user_message = f"""
 {history_text}
@@ -321,7 +337,7 @@ Dane katalogowe:
             except Exception as e:
                 last_error = e
                 msg = str(e)
-                if "503" in msg or "rate_limit" in msg.lower() or "429" in msg:
+                if "503" in msg or "rate_limit" in msg.lower() or "429" in msg or "413" in msg:
                     time.sleep(2 * (attempt + 1))
                     continue
                 break
