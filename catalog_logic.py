@@ -17,16 +17,17 @@ MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+EMBEDDINGS_CACHE_FILE = "embeddings.npy"
+PRODUCTS_CACHE_FILE = "products_cache.json"
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 PRODUCTS = []
 SESSIONS = {}
 
-# Embedding index
-EMBEDDING_MATRIX = None   # np.ndarray shape (N, D)
-EMBEDDING_CACHE = {}      # query_text -> np.ndarray
+EMBEDDING_MATRIX = None
+EMBEDDING_CACHE = {}
 
-# TF-IDF fallback (lazy-loaded only if embedding API fails at query time)
 _TFIDF_VECTORIZER = None
 _TFIDF_MATRIX = None
 
@@ -182,7 +183,6 @@ def infer_color(title):
 
 
 def _none_if_empty(value):
-    """Return None for empty/whitespace strings so JSON shows null."""
     if value is None:
         return None
     v = str(value).strip()
@@ -209,7 +209,6 @@ def build_embedding_text(p):
 
 
 def build_product_json(p):
-    """Build product dict for LLM context. Empty strings → null so model doesn't say 'brak potwierdzenia'."""
     return {
         "id": p.get("id"),
         "nazwa": _none_if_empty(p.get("title")),
@@ -264,7 +263,7 @@ def load_products_from_xml(xml_path="products.xml"):
 
 
 # ---------------------------------------------------------------------------
-# Page scraping — runs ONCE at startup
+# Page scraping
 # ---------------------------------------------------------------------------
 
 def fetch_product_page_fields(url):
@@ -318,11 +317,46 @@ def enrich_all_products(products):
 
 
 # ---------------------------------------------------------------------------
-# Embedding index — with 429 retry + exponential backoff
+# Embedding cache persistence
 # ---------------------------------------------------------------------------
 
-def _embed_batch_with_retry(texts, max_retries=6):
-    delay = 15
+def _save_cache(products, matrix):
+    """Persist enriched products + embedding matrix to disk."""
+    try:
+        with open(PRODUCTS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(products, f, ensure_ascii=False)
+        np.save(EMBEDDINGS_CACHE_FILE, matrix)
+        print(f"[catalog] Cache saved: {PRODUCTS_CACHE_FILE}, {EMBEDDINGS_CACHE_FILE}")
+    except Exception as e:
+        print(f"[catalog] Warning: could not save cache: {e}")
+
+
+def _load_cache():
+    """Load cached products + embedding matrix if both files exist and products.xml hasn't changed."""
+    if not os.path.isfile(PRODUCTS_CACHE_FILE) or not os.path.isfile(EMBEDDINGS_CACHE_FILE):
+        return None, None
+    try:
+        xml_mtime = os.path.getmtime("products.xml")
+        cache_mtime = os.path.getmtime(PRODUCTS_CACHE_FILE)
+        if xml_mtime > cache_mtime:
+            print("[catalog] products.xml newer than cache — rebuilding.")
+            return None, None
+        with open(PRODUCTS_CACHE_FILE, "r", encoding="utf-8") as f:
+            products = json.load(f)
+        matrix = np.load(EMBEDDINGS_CACHE_FILE)
+        print(f"[catalog] Loaded from cache: {len(products)} products, matrix {matrix.shape}")
+        return products, matrix
+    except Exception as e:
+        print(f"[catalog] Cache load failed ({e}) — rebuilding.")
+        return None, None
+
+
+# ---------------------------------------------------------------------------
+# Embedding index
+# ---------------------------------------------------------------------------
+
+def _embed_batch_with_retry(texts, max_retries=8):
+    delay = 10
     for attempt in range(max_retries):
         try:
             result = client.models.embed_content(
@@ -346,14 +380,16 @@ def build_embedding_index(products):
     print(f"[catalog] Building embedding index for {len(products)} products...")
     texts = [build_embedding_text(p) for p in products]
 
-    batch_size = 50
+    batch_size = 20  # smaller batches = less chance of hitting rate limit burst
     batches = []
+    total_batches = -(-len(texts) // batch_size)
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        print(f"[catalog] Embedding batch {i//batch_size + 1}/{-(-len(texts)//batch_size)} ({len(batch)} items)...")
+        batch_num = i // batch_size + 1
+        print(f"[catalog] Embedding batch {batch_num}/{total_batches} ({len(batch)} items)...")
         batches.append(_embed_batch_with_retry(batch))
         if i + batch_size < len(texts):
-            time.sleep(65)
+            time.sleep(5)  # small pause; 429 retry handles real backoff
 
     EMBEDDING_MATRIX = np.vstack(batches)
     norms = np.linalg.norm(EMBEDDING_MATRIX, axis=1, keepdims=True)
@@ -502,7 +538,16 @@ Dane katalogowe (JSON):
 # ---------------------------------------------------------------------------
 
 def init_catalog():
-    global PRODUCTS
+    global PRODUCTS, EMBEDDING_MATRIX
+
+    cached_products, cached_matrix = _load_cache()
+    if cached_products is not None and cached_matrix is not None:
+        PRODUCTS = cached_products
+        EMBEDDING_MATRIX = cached_matrix
+        return
+
+    # Full rebuild
     PRODUCTS = load_products_from_xml("products.xml")
     PRODUCTS = enrich_all_products(PRODUCTS)
     build_embedding_index(PRODUCTS)
+    _save_cache(PRODUCTS, EMBEDDING_MATRIX)
