@@ -106,6 +106,59 @@ def is_followup_question(question):
 
 
 # ---------------------------------------------------------------------------
+# Query filter extraction
+# ---------------------------------------------------------------------------
+
+# Maps normalized query keywords → canonical color value in product data
+COLOR_KEYWORDS = {
+    "czarn": "czarny",
+    "biał": "biały",
+    "bial": "biały",
+    "bezow": "beżowy",
+    "bezó": "beżowy",
+}
+
+AVAILABILITY_KEYWORDS = {
+    "od ręki": "in stock",
+    "od reki": "in stock",
+    "dostępn": "in stock",
+    "dostepn": "in stock",
+    "na zamówienie": "on demand",
+    "na zamowienie": "on demand",
+}
+
+
+def extract_filters(query):
+    """Return dict of hard filters detected in the query text."""
+    q = normalize_polish_text(query)
+    filters = {}
+
+    for kw, color in COLOR_KEYWORDS.items():
+        if kw in q:
+            filters["color"] = color
+            break
+
+    for kw, avail in AVAILABILITY_KEYWORDS.items():
+        if kw in q:
+            filters["availability"] = avail
+            break
+
+    return filters
+
+
+def apply_filters(products, filters):
+    """Filter product list by detected hard constraints. Returns filtered list."""
+    result = products
+    if "color" in filters:
+        color_val = filters["color"]
+        result = [p for p in result if p.get("color") == color_val]
+    if "availability" in filters:
+        avail_val = filters["availability"]
+        result = [p for p in result if p.get("availability") == avail_val]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Product domain helpers
 # ---------------------------------------------------------------------------
 
@@ -275,7 +328,7 @@ def enrich_all_products(products):
 
 def _embed_batch_with_retry(texts, max_retries=6):
     """Embed a single batch, retrying on 429 with exponential backoff."""
-    delay = 15  # seconds — free tier window is 60s/100req
+    delay = 15
     for attempt in range(max_retries):
         try:
             result = client.models.embed_content(
@@ -286,7 +339,7 @@ def _embed_batch_with_retry(texts, max_retries=6):
         except Exception as e:
             msg = str(e)
             if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                wait = delay * (2 ** attempt)  # 15, 30, 60, 120 ...
+                wait = delay * (2 ** attempt)
                 print(f"[catalog] 429 rate limit, waiting {wait}s (attempt {attempt+1}/{max_retries})...")
                 time.sleep(wait)
             else:
@@ -299,16 +352,14 @@ def build_embedding_index(products):
     print(f"[catalog] Building embedding index for {len(products)} products...")
     texts = [build_embedding_text(p) for p in products]
 
-    # Batch size 50 — well under the 100 req/min free tier limit
-    # Sleep 65s between batches to reset the per-minute quota window
     batch_size = 50
     batches = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
         print(f"[catalog] Embedding batch {i//batch_size + 1}/{-(-len(texts)//batch_size)} ({len(batch)} items)...")
         batches.append(_embed_batch_with_retry(batch))
-        if i + batch_size < len(texts):  # no sleep after last batch
-            time.sleep(65)  # wait out the 1-minute quota window
+        if i + batch_size < len(texts):
+            time.sleep(65)
 
     EMBEDDING_MATRIX = np.vstack(batches)
     norms = np.linalg.norm(EMBEDDING_MATRIX, axis=1, keepdims=True)
@@ -328,7 +379,19 @@ def _build_tfidf_fallback():
     _TFIDF_MATRIX = _TFIDF_VECTORIZER.fit_transform(corpus)
 
 
-def search_products(query, top_k=8):
+def search_products(query, top_k=8, filters=None):
+    """
+    Semantic search with optional hard-filter post-processing.
+
+    Strategy:
+    1. Retrieve a larger candidate pool (top_k * 5, max 80).
+    2. Apply hard filters (color, availability) to the pool.
+    3. If filtered result >= top_k, return top top_k filtered.
+    4. If filtered result is non-empty but < top_k, return all filtered.
+    5. If filter wiped everything (edge case), fall back to unfiltered top_k.
+    """
+    candidate_k = min(len(PRODUCTS), max(top_k * 5, 40))
+
     if EMBEDDING_MATRIX is not None:
         try:
             query_vec = EMBEDDING_CACHE.get(query)
@@ -339,17 +402,40 @@ def search_products(query, top_k=8):
                     query_vec = query_vec / norm
                 EMBEDDING_CACHE[query] = query_vec
             scores = EMBEDDING_MATRIX @ query_vec
-            ranked_idx = scores.argsort()[::-1][:top_k]
-            return [PRODUCTS[i] for i in ranked_idx]
+            ranked_idx = scores.argsort()[::-1][:candidate_k]
+            candidates = [PRODUCTS[i] for i in ranked_idx]
         except Exception as e:
             print(f"[catalog] Embedding search failed, falling back to TF-IDF: {e}")
+            candidates = None
+    else:
+        candidates = None
 
-    from sklearn.metrics.pairwise import cosine_similarity as cos_sim
-    _build_tfidf_fallback()
-    qvec = _TFIDF_VECTORIZER.transform([query])
-    sims = cos_sim(qvec, _TFIDF_MATRIX).flatten()
-    ranked_idx = sims.argsort()[::-1][:top_k]
-    return [PRODUCTS[i] for i in ranked_idx]
+    if candidates is None:
+        from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+        _build_tfidf_fallback()
+        qvec = _TFIDF_VECTORIZER.transform([query])
+        sims = cos_sim(qvec, _TFIDF_MATRIX).flatten()
+        ranked_idx = sims.argsort()[::-1][:candidate_k]
+        candidates = [PRODUCTS[i] for i in ranked_idx]
+
+    if filters:
+        filtered = apply_filters(candidates, filters)
+        if filtered:
+            return filtered[:top_k]
+        # filters found nothing in candidates — widen to full catalog
+        filtered = apply_filters(PRODUCTS, filters)
+        if filtered:
+            # re-rank the full filtered set by embedding score if possible
+            if EMBEDDING_MATRIX is not None:
+                query_vec = EMBEDDING_CACHE.get(query)
+                if query_vec is not None:
+                    idxs = [p["id"] - 1 for p in filtered]
+                    sub_scores = (EMBEDDING_MATRIX[idxs] @ query_vec)
+                    order = sub_scores.argsort()[::-1]
+                    filtered = [filtered[i] for i in order]
+            return filtered[:top_k]
+
+    return candidates[:top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +473,10 @@ def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
         if last_user_questions:
             retrieval_query = f"{last_user_questions[-1]} {question}"
 
-    matches = search_products(retrieval_query, top_k=top_k)
+    # Extract hard filters (color, availability) from the question
+    filters = extract_filters(retrieval_query)
+
+    matches = search_products(retrieval_query, top_k=top_k, filters=filters or None)
     context_json = json.dumps([build_product_json(p) for p in matches], ensure_ascii=False, indent=2)
 
     user_message = f"""
