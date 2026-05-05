@@ -37,43 +37,37 @@ _TFIDF_MATRIX = None
 SYSTEM_INSTRUCTION = """
 Jesteś wyszukiwarką i doradcą produktowym sklepu DABSTORY.
 
-Zasady:
+Zasady ogólne:
 - Odpowiadasz wyłącznie po polsku.
-- Używasz tylko danych przekazanych w sekcji Dane katalogowe.
-- Nie wymyślasz parametrów, których nie ma w danych.
-- Jeśli czegoś nie ma w danych, napisz dokładnie: "Brak potwierdzenia w danych katalogowych".
-- Nie wyciągaj wniosków z samego zdjęcia produktu.
-- Jeśli produkt ma pole "wariant", uwzględnij je w odpowiedzi.
-- Odróżniaj klasyczną szczotkę WC od zestawu 2w1 ze stojakiem lub uchwytem na papier.
-- Jeśli produkt jest wariantem ze stojakiem, zestawem 2w1 albo ma zintegrowany uchwyt na papier, zaznacz to wyraźnie w odpowiedzi.
-- Nie traktuj części zamiennej jako pełnego produktu, jeśli dane wskazują, że to tylko element wymienny.
-- Nie pisz marketingowo.
-- Nie używaj zwrotów typu "z przyjemnością", "mam nadzieję", "chętnie pomogę".
+- Używasz tylko danych przekazanych w sekcji "Dane katalogowe".
+- Nie wymyślasz wartości, których nie ma w danych.
+- Jeśli pole JSON ma wartość null lub nie istnieje, napisz "brak danych" dla tego pola.
+- Nie pisz marketingowo. Nie używaj zwrotów: "z przyjemnością", "mam nadzieję", "chętnie pomogę".
 
-Zasady interpretacji:
-- "in stock" oznacza "dostępny od ręki".
-- "on demand" oznacza "na zamówienie".
-- Jeśli pytanie jest kontynuacją wcześniejszego wątku, uwzględnij kontekst rozmowy.
-- Jeśli użytkownik rozpoczyna nowy temat, nie przenoś niepotrzebnie wcześniejszych filtrów.
+Zasady odczytu danych:
+- Pole "nazwa" zawiera pełną nazwę produktu, w tym kolor i wariant montażu — wyciągnij je stamtąd, jeśli dedykowane pola "kolor" lub "typ_montazu" są null.
+  Przykład: "Szczotka WC EQULA - Czarna Wersja Wiszące" → kolor: czarny, typ montażu: wiszące.
+- Pole "wariant" opisuje typ produktu (klasyczna szczotka, zestaw 2w1, część zamienna) — zawsze je wypisz.
+- "in stock" = dostępny od ręki, "on demand" = na zamówienie.
+- Odróżniaj klasyczną szczotkę WC od zestawu 2w1 ze stojakiem. Zaznacz tę różnicę przy każdym produkcie.
+- Nie traktuj części zamiennej jako pełnego produktu.
 
 Format odpowiedzi:
-- Jeśli użytkownik pyta o listę produktów, zwróć krótką listę punktowaną.
-- Dla każdego produktu zawsze wypisz osobno:
-  1. nazwę,
-  2. wariant produktu,
-  3. cenę,
-  4. dostępność,
-  5. kolor,
-  6. materiał,
-  7. typ montażu,
-  8. wymiary,
-  9. link.
-- Nie pomijaj pola "wariant", jeśli występuje w danych katalogowych.
-- Jeśli użytkownik pyta o porównanie, porównaj produkty w punktach.
+- Lista produktów: krótka lista punktowana.
+- Dla każdego produktu wypisz:
+  1. nazwa
+  2. wariant (typ produktu)
+  3. cena
+  4. dostępność
+  5. kolor (z pola "kolor"; jeśli null — wyciągnij z nazwy)
+  6. materiał
+  7. typ montażu (z pola "typ_montazu"; jeśli null — wyciągnij z nazwy)
+  8. wymiary
+  9. link
+- Jeśli pole ma wartość null i nie można go wyciągnąć z nazwy → napisz "brak danych".
+- Porównanie: punkty różnic.
 - Jeśli wyników jest dużo, pokaż najtrafniejsze.
 - Zachowuj odpowiedzi zwięzłe i konkretne.
-- Jeśli dwa produkty różnią się głównie kolorem, napisz to wprost.
-- Jeśli w wynikach są zarówno klasyczne szczotki WC, jak i zestawy 2w1, zaznacz tę różnicę przy każdym produkcie.
 """.strip()
 
 FALLBACK_MODELS = [
@@ -109,7 +103,6 @@ def is_followup_question(question):
 # Query filter extraction
 # ---------------------------------------------------------------------------
 
-# Maps normalized query keywords → canonical color value in product data
 COLOR_KEYWORDS = {
     "czarn": "czarny",
     "biał": "biały",
@@ -129,32 +122,25 @@ AVAILABILITY_KEYWORDS = {
 
 
 def extract_filters(query):
-    """Return dict of hard filters detected in the query text."""
     q = normalize_polish_text(query)
     filters = {}
-
     for kw, color in COLOR_KEYWORDS.items():
         if kw in q:
             filters["color"] = color
             break
-
     for kw, avail in AVAILABILITY_KEYWORDS.items():
         if kw in q:
             filters["availability"] = avail
             break
-
     return filters
 
 
 def apply_filters(products, filters):
-    """Filter product list by detected hard constraints. Returns filtered list."""
     result = products
     if "color" in filters:
-        color_val = filters["color"]
-        result = [p for p in result if p.get("color") == color_val]
+        result = [p for p in result if p.get("color") == filters["color"]]
     if "availability" in filters:
-        avail_val = filters["availability"]
-        result = [p for p in result if p.get("availability") == avail_val]
+        result = [p for p in result if p.get("availability") == filters["availability"]]
     return result
 
 
@@ -173,7 +159,7 @@ def product_variant_label(p):
         return "klasyczna szczotka WC"
     if "stojak" in title and "szczotka" in title:
         return "zestaw 2w1: szczotka WC + stojak"
-    return ""
+    return None
 
 
 def infer_product_type(title):
@@ -192,7 +178,15 @@ def infer_color(title):
     if "czarn" in t: return "czarny"
     if "bial" in t:  return "biały"
     if "bezow" in t or "bezowa" in t: return "beżowy"
-    return ""
+    return None
+
+
+def _none_if_empty(value):
+    """Return None for empty/whitespace strings so JSON shows null."""
+    if value is None:
+        return None
+    v = str(value).strip()
+    return v if v else None
 
 
 # ---------------------------------------------------------------------------
@@ -204,36 +198,37 @@ def build_embedding_text(p):
         p.get("title", ""),
         p.get("brand", ""),
         p.get("category", ""),
-        product_variant_label(p),
-        p.get("color", ""),
-        p.get("mount_type", ""),
-        p.get("material", ""),
-        p.get("finish", ""),
-        p.get("description", "")[:300],
+        product_variant_label(p) or "",
+        p.get("color", "") or "",
+        p.get("mount_type", "") or "",
+        p.get("material", "") or "",
+        p.get("finish", "") or "",
+        (p.get("description", "") or "")[:300],
     ]
     return " ".join(x for x in parts if x)
 
 
 def build_product_json(p):
+    """Build product dict for LLM context. Empty strings → null so model doesn't say 'brak potwierdzenia'."""
     return {
         "id": p.get("id"),
-        "nazwa": p.get("title", ""),
-        "marka": p.get("brand", ""),
-        "mpn": p.get("mpn", ""),
-        "gtin": p.get("gtin", ""),
-        "dostepnosc": p.get("availability", ""),
-        "cena": p.get("price", ""),
-        "kategoria": p.get("category", ""),
-        "typ_produktu": p.get("product_type", ""),
+        "nazwa": _none_if_empty(p.get("title")),
+        "marka": _none_if_empty(p.get("brand")),
+        "mpn": _none_if_empty(p.get("mpn")),
+        "gtin": _none_if_empty(p.get("gtin")),
+        "dostepnosc": _none_if_empty(p.get("availability")),
+        "cena": _none_if_empty(p.get("price")),
+        "kategoria": _none_if_empty(p.get("category")),
+        "typ_produktu": _none_if_empty(p.get("product_type")),
         "wariant": product_variant_label(p),
-        "kolor": p.get("color", ""),
-        "typ_montazu": p.get("mount_type", ""),
-        "material": p.get("material", ""),
-        "wykonczenie": p.get("finish", ""),
-        "wymiary": p.get("dimensions", ""),
-        "link": p.get("link", ""),
-        "zdjecie": p.get("image", ""),
-        "opis": p.get("description", ""),
+        "kolor": _none_if_empty(p.get("color")),
+        "typ_montazu": _none_if_empty(p.get("mount_type")),
+        "material": _none_if_empty(p.get("material")),
+        "wykonczenie": _none_if_empty(p.get("finish")),
+        "wymiary": _none_if_empty(p.get("dimensions")),
+        "link": _none_if_empty(p.get("link")),
+        "zdjecie": _none_if_empty(p.get("image")),
+        "opis": _none_if_empty(p.get("description")),
     }
 
 
@@ -327,7 +322,6 @@ def enrich_all_products(products):
 # ---------------------------------------------------------------------------
 
 def _embed_batch_with_retry(texts, max_retries=6):
-    """Embed a single batch, retrying on 429 with exponential backoff."""
     delay = 15
     for attempt in range(max_retries):
         try:
@@ -380,16 +374,6 @@ def _build_tfidf_fallback():
 
 
 def search_products(query, top_k=8, filters=None):
-    """
-    Semantic search with optional hard-filter post-processing.
-
-    Strategy:
-    1. Retrieve a larger candidate pool (top_k * 5, max 80).
-    2. Apply hard filters (color, availability) to the pool.
-    3. If filtered result >= top_k, return top top_k filtered.
-    4. If filtered result is non-empty but < top_k, return all filtered.
-    5. If filter wiped everything (edge case), fall back to unfiltered top_k.
-    """
     candidate_k = min(len(PRODUCTS), max(top_k * 5, 40))
 
     if EMBEDDING_MATRIX is not None:
@@ -422,10 +406,8 @@ def search_products(query, top_k=8, filters=None):
         filtered = apply_filters(candidates, filters)
         if filtered:
             return filtered[:top_k]
-        # filters found nothing in candidates — widen to full catalog
         filtered = apply_filters(PRODUCTS, filters)
         if filtered:
-            # re-rank the full filtered set by embedding score if possible
             if EMBEDDING_MATRIX is not None:
                 query_vec = EMBEDDING_CACHE.get(query)
                 if query_vec is not None:
@@ -473,9 +455,7 @@ def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
         if last_user_questions:
             retrieval_query = f"{last_user_questions[-1]} {question}"
 
-    # Extract hard filters (color, availability) from the question
     filters = extract_filters(retrieval_query)
-
     matches = search_products(retrieval_query, top_k=top_k, filters=filters or None)
     context_json = json.dumps([build_product_json(p) for p in matches], ensure_ascii=False, indent=2)
 
