@@ -2,17 +2,16 @@ import os
 import re
 import time
 import requests
-import xml.etree.ElementTree as ET
+from lxml import etree
 from lxml import html
-from google import genai
-from google.genai import types
+from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = Groq(api_key=GROQ_API_KEY)
 
 PRODUCTS = []
 SESSIONS = {}
@@ -63,8 +62,8 @@ Format odpowiedzi:
 
 FALLBACK_MODELS = [
     MODEL_NAME,
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
 ]
 
 FOLLOWUP_PHRASES = [
@@ -91,7 +90,6 @@ def is_followup_question(question):
 def product_variant_label(p):
     pt = p.get("product_type", "")
     title = normalize_polish_text(p.get("title", ""))
-
     if pt == "toilet_brush_stand":
         return "zestaw 2w1: szczotka WC + stojak/uchwyt na papier"
     if pt == "replacement_brush":
@@ -134,22 +132,40 @@ def infer_product_type(title):
         return "toilet_brush"
     return "other"
 
+def _lxml_text(element, tag, ns=None):
+    if ns:
+        tag = f"{{{ns}}}{tag}"
+    found = element.find(tag)
+    if found is not None and found.text:
+        return found.text.strip()
+    return ""
+
+G = "http://base.google.com/ns/1.0"
+
 def load_products_from_xml(xml_path="products.xml"):
-    tree = ET.parse(xml_path)
+    parser = etree.XMLParser(recover=True, strip_cdata=False)
+    tree = etree.parse(xml_path, parser)
     root = tree.getroot()
     products = []
 
-    for i, item in enumerate(root.findall(".//item"), start=1):
-        title = item.findtext("title", default="").strip()
-        link = item.findtext("link", default="").strip()
-        description = item.findtext("description", default="").strip()
-        brand = item.findtext("{http://base.google.com/ns/1.0}brand", default="").strip()
-        mpn = item.findtext("{http://base.google.com/ns/1.0}mpn", default="").strip()
-        gtin = item.findtext("{http://base.google.com/ns/1.0}gtin", default="").strip()
-        availability = item.findtext("{http://base.google.com/ns/1.0}availability", default="").strip()
-        price = item.findtext("{http://base.google.com/ns/1.0}price", default="").strip()
-        image = item.findtext("{http://base.google.com/ns/1.0}image_link", default="").strip()
-        category = item.findtext("{http://base.google.com/ns/1.0}google_product_category", default="").strip()
+    for i, item in enumerate(root.iter("item"), start=1):
+        title        = _lxml_text(item, "title", G)
+        link         = _lxml_text(item, "link", G)
+        description  = _lxml_text(item, "description", G)
+        brand        = _lxml_text(item, "brand", G)
+        mpn          = _lxml_text(item, "mpn", G)
+        gtin         = _lxml_text(item, "gtin", G)
+        availability = _lxml_text(item, "availability", G)
+        price        = _lxml_text(item, "price", G)
+        image        = _lxml_text(item, "image_link", G)
+        category     = _lxml_text(item, "google_product_category", G)
+
+        if not link:
+            link = _lxml_text(item, "link")
+        if not link:
+            atom_link = item.find("{http://www.w3.org/2005/Atom}link")
+            if atom_link is not None:
+                link = atom_link.get("href", "")
 
         color = ""
         title_norm = normalize_polish_text(title)
@@ -182,6 +198,8 @@ def load_products_from_xml(xml_path="products.xml"):
         p["text"] = build_product_text(p)
         products.append(p)
 
+    first_title = products[0]['title'] if products else 'brak'
+    print(f"[catalog] Załadowano {len(products)} produktów. Przykład: '{first_title}'")
     return products
 
 def build_search_index():
@@ -211,7 +229,7 @@ def fetch_product_page_fields(url):
         if "tworzywo sztuczne" in text_norm:
             material.append("tworzywo sztuczne")
 
-        has_wall = any(x in text_norm for x in ["wiszace", "wiszacy", "wiszaca"])
+        has_wall  = any(x in text_norm for x in ["wiszace", "wiszacy", "wiszaca"])
         has_floor = any(x in text_norm for x in ["wolnostojace", "wolnostojacy", "wolnostojaca"])
 
         mount_type = ""
@@ -231,9 +249,9 @@ def fetch_product_page_fields(url):
             finish.append("mat")
 
         return {
-            "material": ", ".join(dict.fromkeys(material)),
+            "material":   ", ".join(dict.fromkeys(material)),
             "mount_type": mount_type,
-            "finish": ", ".join(dict.fromkeys(finish)),
+            "finish":     ", ".join(dict.fromkeys(finish)),
             "dimensions": ""
         }
     except Exception:
@@ -247,12 +265,9 @@ def enrich_one_product_from_page(p):
     needs_more = not p.get("material") or not p.get("mount_type") or not p.get("finish")
     if needs_more:
         extra = fetch_product_page_fields(p["link"])
-        if extra.get("material") and not p.get("material"):
-            p["material"] = extra["material"]
-        if extra.get("mount_type") and not p.get("mount_type"):
-            p["mount_type"] = extra["mount_type"]
-        if extra.get("finish") and not p.get("finish"):
-            p["finish"] = extra["finish"]
+        if extra.get("material")   and not p.get("material"):   p["material"]   = extra["material"]
+        if extra.get("mount_type") and not p.get("mount_type"): p["mount_type"] = extra["mount_type"]
+        if extra.get("finish")     and not p.get("finish"):     p["finish"]     = extra["finish"]
 
     p["text"] = build_product_text(p)
     return p
@@ -308,23 +323,23 @@ Dane katalogowe:
     for model_name in FALLBACK_MODELS:
         for attempt in range(retries):
             try:
-                response = client.models.generate_content(
+                response = client.chat.completions.create(
                     model=model_name,
-                    contents=user_message,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=0.2,
-                    )
+                    messages=[
+                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "user",   "content": user_message}
+                    ],
+                    temperature=0.2,
                 )
-                answer = response.text
-                chat_memory.append({"role": "user", "text": question})
+                answer = response.choices[0].message.content
+                chat_memory.append({"role": "user",      "text": question})
                 chat_memory.append({"role": "assistant", "text": answer})
                 session["chat_memory"] = chat_memory[-(memory_turns * 2):]
                 return answer
             except Exception as e:
                 last_error = e
                 msg = str(e)
-                if "503" in msg or "UNAVAILABLE" in msg or "high demand" in msg:
+                if "503" in msg or "rate_limit" in msg.lower() or "429" in msg:
                     time.sleep(2 * (attempt + 1))
                     continue
                 break
