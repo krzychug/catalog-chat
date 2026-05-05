@@ -2,7 +2,7 @@ import os
 import re
 import time
 import requests
-import xml.etree.ElementTree as ET
+from lxml import etree
 from lxml import html
 from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -132,22 +132,40 @@ def infer_product_type(title):
         return "toilet_brush"
     return "other"
 
+def _lxml_text(element, tag, ns=None):
+    """Get text from lxml element, handling CDATA and namespaces."""
+    if ns:
+        tag = f"{{{ns}}}{tag}"
+    found = element.find(tag)
+    if found is not None and found.text:
+        return found.text.strip()
+    return ""
+
+G = "http://base.google.com/ns/1.0"
+
 def load_products_from_xml(xml_path="products.xml"):
-    tree = ET.parse(xml_path)
+    parser = etree.XMLParser(recover=True, strip_cdata=False)
+    tree = etree.parse(xml_path, parser)
     root = tree.getroot()
     products = []
 
-    for i, item in enumerate(root.findall(".//item"), start=1):
-        title = item.findtext("title", default="").strip()
-        link = item.findtext("link", default="").strip()
-        description = item.findtext("description", default="").strip()
-        brand = item.findtext("{http://base.google.com/ns/1.0}brand", default="").strip()
-        mpn = item.findtext("{http://base.google.com/ns/1.0}mpn", default="").strip()
-        gtin = item.findtext("{http://base.google.com/ns/1.0}gtin", default="").strip()
-        availability = item.findtext("{http://base.google.com/ns/1.0}availability", default="").strip()
-        price = item.findtext("{http://base.google.com/ns/1.0}price", default="").strip()
-        image = item.findtext("{http://base.google.com/ns/1.0}image_link", default="").strip()
-        category = item.findtext("{http://base.google.com/ns/1.0}google_product_category", default="").strip()
+    for i, item in enumerate(root.iter("item"), start=1):
+        title = _lxml_text(item, "title")
+        link = _lxml_text(item, "link")
+        description = _lxml_text(item, "description")
+        brand = _lxml_text(item, "brand", G)
+        mpn = _lxml_text(item, "mpn", G)
+        gtin = _lxml_text(item, "gtin", G)
+        availability = _lxml_text(item, "availability", G)
+        price = _lxml_text(item, "price", G)
+        image = _lxml_text(item, "image_link", G)
+        category = _lxml_text(item, "google_product_category", G)
+
+        # fallback: jeśli link pusty, spróbuj atom:link href
+        if not link:
+            atom_link = item.find("{http://www.w3.org/2005/Atom}link")
+            if atom_link is not None:
+                link = atom_link.get("href", "")
 
         color = ""
         title_norm = normalize_polish_text(title)
@@ -180,6 +198,7 @@ def load_products_from_xml(xml_path="products.xml"):
         p["text"] = build_product_text(p)
         products.append(p)
 
+    print(f"[catalog] Załadowano {len(products)} produktów. Przykład: '{products[0]['title'] if products else 'brak'}'")
     return products
 
 def build_search_index():
