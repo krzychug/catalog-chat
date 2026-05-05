@@ -4,15 +4,14 @@ import time
 import requests
 import xml.etree.ElementTree as ET
 from lxml import html
-from google import genai
-from google.genai import types
+from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = Groq(api_key=GROQ_API_KEY)
 
 PRODUCTS = []
 SESSIONS = {}
@@ -63,8 +62,8 @@ Format odpowiedzi:
 
 FALLBACK_MODELS = [
     MODEL_NAME,
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
 ]
 
 FOLLOWUP_PHRASES = [
@@ -307,15 +306,15 @@ Dane katalogowe:
     for model_name in FALLBACK_MODELS:
         for attempt in range(retries):
             try:
-                response = client.models.generate_content(
+                response = client.chat.completions.create(
                     model=model_name,
-                    contents=user_message,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=0.2,
-                    )
+                    messages=[
+                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "user", "content": user_message}
+                    ],
+                    temperature=0.2,
                 )
-                answer = response.text
+                answer = response.choices[0].message.content
                 chat_memory.append({"role": "user", "text": question})
                 chat_memory.append({"role": "assistant", "text": answer})
                 session["chat_memory"] = chat_memory[-(memory_turns * 2):]
@@ -323,7 +322,7 @@ Dane katalogowe:
             except Exception as e:
                 last_error = e
                 msg = str(e)
-                if "503" in msg or "UNAVAILABLE" in msg or "high demand" in msg:
+                if "503" in msg or "rate_limit" in msg.lower() or "429" in msg:
                     time.sleep(2 * (attempt + 1))
                     continue
                 break
