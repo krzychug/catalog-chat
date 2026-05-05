@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -6,7 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from catalog_logic import init_catalog, chat_with_session, reset_session
 
-app = FastAPI(title="DABSTORY Catalog Chat")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_catalog()
+    yield
+
+app = FastAPI(title="DABSTORY Catalog Chat", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,10 +30,6 @@ class ChatRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     session_id: str
-
-@app.on_event("startup")
-def startup_event():
-    init_catalog()
 
 @app.get("/")
 def root():
