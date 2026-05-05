@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DABSTORY Chat</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#f7f7f7; margin:0; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 24px; }
+    h1 { margin-bottom: 8px; }
+    .sub { color:#666; margin-bottom: 16px; }
+    #chat { background:#fff; border:1px solid #ddd; border-radius:12px; padding:16px; min-height:420px; max-height:70vh; overflow:auto; }
+    .msg { margin: 14px 0; padding: 12px 14px; border-radius: 10px; white-space: pre-wrap; line-height:1.5; }
+    .user { background:#e8f0fe; }
+    .assistant { background:#f1f3f4; }
+    .bar { display:flex; gap:12px; margin-top:16px; }
+    textarea { flex:1; min-height:100px; padding:12px; border-radius:10px; border:1px solid #ccc; resize:vertical; font:inherit; }
+    .buttons { display:flex; flex-direction:column; gap:8px; }
+    button { padding: 12px 16px; border:none; border-radius:10px; cursor:pointer; }
+    .send { background:#111; color:#fff; }
+    .reset { background:#ddd; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>DABSTORY Chat</h1>
+    <div class="sub">Zapytaj o produkty, porównania, kolory, dostępność i warianty.</div>
+    <div id="chat"></div>
+
+    <div class="bar">
+      <textarea id="message" placeholder="Np. Pokaż czarne szczotki WC"></textarea>
+      <div class="buttons">
+        <button class="send" onclick="sendMessage()">Wyślij</button>
+        <button class="reset" onclick="resetChat()">Nowa rozmowa</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const chat = document.getElementById("chat");
+    const messageInput = document.getElementById("message");
+    const sessionId = crypto.randomUUID();
+
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const message = messageInput.value.trim();
+      if (!message) return;
+
+      addMessage("user", message);
+      messageInput.value = "";
+
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ session_id: sessionId, message })
+      });
+
+      const data = await res.json();
+      addMessage("assistant", data.answer || "Brak odpowiedzi.");
+    }
+
+    async function resetChat() {
+      await fetch("/reset", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ session_id: sessionId })
+      });
+      chat.innerHTML = "";
+    }
+
+    messageInput.addEventListener("keydown", function(e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>
