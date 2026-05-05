@@ -60,12 +60,6 @@ Format odpowiedzi:
 - Jeśli w wynikach są zarówno klasyczne szczotki WC, jak i zestawy 2w1, zaznacz tę różnicę przy każdym produkcie.
 """.strip()
 
-FALLBACK_MODELS = [
-    MODEL_NAME,
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-]
-
 FOLLOWUP_PHRASES = [
     "a które", "a ktore", "które z nich", "ktore z nich", "z nich",
     "te", "ten", "ta", "tamte", "pierwsze", "drugie",
@@ -133,7 +127,6 @@ def infer_product_type(title):
     return "other"
 
 def _lxml_text(element, tag, ns=None):
-    """Get text from lxml element, handling CDATA and namespaces."""
     if ns:
         tag = f"{{{ns}}}{tag}"
     found = element.find(tag)
@@ -150,7 +143,6 @@ def load_products_from_xml(xml_path="products.xml"):
     products = []
 
     for i, item in enumerate(root.iter("item"), start=1):
-        # Wszystkie pola są w namespace g: (http://base.google.com/ns/1.0)
         title        = _lxml_text(item, "title", G)
         link         = _lxml_text(item, "link", G)
         description  = _lxml_text(item, "description", G)
@@ -162,7 +154,6 @@ def load_products_from_xml(xml_path="products.xml"):
         image        = _lxml_text(item, "image_link", G)
         category     = _lxml_text(item, "google_product_category", G)
 
-        # fallback: jeśli g:link pusty, spróbuj zwykły <link> lub atom:link
         if not link:
             link = _lxml_text(item, "link")
         if not link:
@@ -211,7 +202,7 @@ def build_search_index():
     VECTORIZER = TfidfVectorizer()
     DOC_MATRIX = VECTORIZER.fit_transform(corpus)
 
-def search_products(query, top_k=8):
+def search_products(query, top_k=3):
     query_vec = VECTORIZER.transform([query])
     sims = cosine_similarity(query_vec, DOC_MATRIX).flatten()
     ranked_idx = sims.argsort()[::-1][:top_k]
@@ -290,13 +281,13 @@ def get_session(session_id):
         SESSIONS[session_id] = {"chat_memory": []}
     return SESSIONS[session_id]
 
-def chat_with_session(session_id, question, top_k=8, retries=3, memory_turns=6):
+def chat_with_session(session_id, question, top_k=3, retries=3, memory_turns=2):
     session = get_session(session_id)
     chat_memory = session["chat_memory"]
 
     history_text = ""
     if chat_memory:
-        recent = chat_memory[-memory_turns:]
+        recent = chat_memory[-(memory_turns * 2):]
         history_text = "\n\nHistoria rozmowy:\n" + "\n".join(
             [f"{m['role'].upper()}: {m['text']}" for m in recent]
         )
@@ -323,29 +314,29 @@ Dane katalogowe:
 
     last_error = None
 
-    for model_name in FALLBACK_MODELS:
-        for attempt in range(retries):
-            try:
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
-                        {"role": "user",   "content": user_message}
-                    ],
-                    temperature=0.2,
-                )
-                answer = response.choices[0].message.content
-                chat_memory.append({"role": "user",      "text": question})
-                chat_memory.append({"role": "assistant", "text": answer})
-                session["chat_memory"] = chat_memory[-(memory_turns * 2):]
-                return answer
-            except Exception as e:
-                last_error = e
-                msg = str(e)
-                if "503" in msg or "rate_limit" in msg.lower() or "429" in msg:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                break
+    for attempt in range(retries):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_INSTRUCTION},
+                    {"role": "user",   "content": user_message}
+                ],
+                temperature=0.2,
+                max_tokens=400,
+            )
+            answer = response.choices[0].message.content
+            chat_memory.append({"role": "user",      "text": question})
+            chat_memory.append({"role": "assistant", "text": answer})
+            session["chat_memory"] = chat_memory[-(memory_turns * 2):]
+            return answer
+        except Exception as e:
+            last_error = e
+            msg = str(e)
+            if "503" in msg or "rate_limit" in msg.lower() or "429" in msg:
+                time.sleep(2 * (attempt + 1))
+                continue
+            break
 
     return f"Wystąpił błąd po stronie modelu: {last_error}"
 
